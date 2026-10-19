@@ -1,0 +1,189 @@
+name: verify
+# Каждые 30 минут: пул из 37 источников -> реальные VPN-сеансы -> ключ из ТОЛЬКО рабочих (~30 серверов)
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify with real sessions
+        run: |
+          cat > verifier_run.py << 'PYEOF'
+          #!/usr/bin/env python3
+          """Верификатор: реальный VPN-сеанс через каждый сервер.
+          В ключ попадают ТОЛЬКО серверы, через которые реально открылась страница."""
+          import subprocess, json, os, sys, time, re, base64, random, tempfile, urllib.request, zipfile as zf
+          from urllib.parse import parse_qs
+          from concurrent.futures import ThreadPoolExecutor
+
+          HERE = os.path.dirname(os.path.abspath(__file__))
+          XR = os.path.join(HERE, "xr", "xray")
+          POOL_URLS = (
+          [f"https://raw.githubusercontent.com/nikita29a/FreeProxyList/HEAD/mirror/{i}.txt" for i in range(1,27)]
+          + ["https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/HEAD/data/githubmirror/clean/vless.txt",
+             "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/HEAD/data/normalized/vless.txt",
+             "https://raw.githubusercontent.com/kort0881/vpn-vless-configs-russia/HEAD/data/ru-sni/vless.txt"]
+          + ["https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/HEAD/BLACK_VLESS_RUS.txt",
+             "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/HEAD/BLACK_VLESS_RUS_mobile.txt",
+             "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/HEAD/Export/Base64/PROXIES_ONLY/BLACK_VLESS_RUS_base64.txt"]
+          + ["https://vless.svinakraft.workers.dev/fastest.txt",
+             "https://vless.svinakraft.workers.dev/podpiska.txt"]
+          + ["https://gitverse.ru/api/repos/zieng2/wl/raw/branch/master/list_universal.txt",
+             "https://codeberg.org/zieng2/wl/raw/branch/main/vless_universal.txt"]
+          + ["https://v2cross.com/en/free-v2ray-nodes/"]
+          )
+          POPULAR = ["DE","NL","FI","SE","US","GB","JP","SG","TR","CA","FR","PL","CH","IE","AT","IT","ES"]
+          FLAG = {"🇺🇸":"US","🇩🇪":"DE","🇳🇱":"NL","🇫🇮":"FI","🇸🇪":"SE","🇬🇧":"GB","🇯🇵":"JP",
+                  "🇸🇬":"SG","🇹🇷":"TR","🇨🇦":"CA","🇫🇷":"FR","🇵🇱":"PL","🇨🇭":"CH","🇮🇪":"IE",
+                  "🇦🇹":"AT","🇮🇹":"IT","🇪🇸":"ES"}
+
+          def ensure_xray():
+              if os.path.exists(XR): return
+              url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+              zp = os.path.join(HERE, "xray.zip")
+              urllib.request.urlretrieve(url, zp)
+              zf.ZipFile(zp).extractall(os.path.join(HERE, "xr"))
+              os.chmod(XR, 0o755)
+
+          def load_pool(path):
+              if path and os.path.exists(path):
+                  txt = open(path).read()
+              else:
+                  txt = ""
+                  for u in POOL_URLS:
+                      try:
+                          txt += "\n" + urllib.request.urlopen(urllib.request.Request(
+                              u, headers={"User-Agent":"verifier"}), timeout=30).read().decode("utf-8","ignore")
+                      except Exception: pass
+              links = []
+              for line in txt.splitlines():
+                  line = line.strip()
+                  if re.match(r"^vless://", line): links.append(line)
+                  elif line and len(line) > 50 and re.fullmatch(r"[A-Za-z0-9+/=_-]+", line):
+                      try:
+                          dec = base64.b64decode(line + "==").decode("utf-8","ignore")
+                          links += [l.strip() for l in dec.splitlines() if l.strip().startswith("vless://")]
+                      except Exception: pass
+              return links
+
+          def parse(line):
+              m = re.match(r"vless://([^@/]+)@([^:]+):(\d+)\??(.*)", line.split("#")[0])
+              if not m: return None
+              q = parse_qs(m.group(4))
+              net = q.get("type",["tcp"])[0]
+              if net == "raw": net = "tcp"
+              if net not in ("tcp","ws","grpc","http"): return None
+              return {"uuid":m.group(1),"host":m.group(2),"port":int(m.group(3)),
+                      "net":net,"sec":q.get("security",["none"])[0],"sni":q.get("sni",[""])[0],
+                      "fp":q.get("fp",[""])[0],"pbk":q.get("pbk",[""])[0],"sid":q.get("sid",[""])[0],
+                      "path":q.get("path",[""])[0],"hosthdr":q.get("host",[""])[0],
+                      "flow":q.get("flow",[""])[0] if net=="tcp" else "","raw":line,
+                      "name":line.split("#")[-1]}
+
+          def country(n, line):
+              for f,c in FLAG.items():
+                  if f in line: return c
+              up = n["name"].upper() + " " + n["host"]
+              for c in POPULAR:
+                  if re.search(rf"\b{c}\b", up): return c
+              return None
+
+          def test(n):
+              lp = random.randint(20000, 45000)
+              stream = {"network": n["net"]}
+              if n["sec"]=="tls":
+                  stream["security"]="tls"; stream["tlsSettings"]={"serverName":n["sni"] or n["host"]}
+              elif n["sec"]=="reality":
+                  stream["security"]="reality"
+                  stream["realitySettings"]={"serverName":n["sni"],"publicKey":n["pbk"],
+                                             "shortId":n["sid"],"fingerprint":n["fp"] or "chrome"}
+              else:
+                  stream["security"]="none"
+              if n["net"]=="ws":
+                  stream["wsSettings"]={"path":n["path"] or "/","headers":{"Host":n["hosthdr"] or n["sni"] or n["host"]}}
+              elif n["net"]=="grpc":
+                  stream["grpcSettings"]={"serviceName":n["path"].strip("/") or ""}
+              cfg={"log":{"loglevel":"warning"},
+                   "inbounds":[{"listen":"127.0.0.1","port":lp,"protocol":"socks","settings":{"udp":False}}],
+                   "outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":n["host"],"port":n["port"],
+                      "users":[{"id":n["uuid"],"encryption":"none","flow":n["flow"]}]}]},"streamSettings":stream},
+                     {"protocol":"freedom","tag":"direct"}]}
+              fd, cf = tempfile.mkstemp(suffix=".json"); os.close(fd)
+              json.dump(cfg, open(cf,"w"))
+              p = subprocess.Popen([XR,"run","-c",cf], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              time.sleep(0.8)
+              ok = False
+              try:
+                  r = subprocess.run(["curl","-s","-o","/dev/null","-w","%{http_code}",
+                      "--socks5-hostname",f"127.0.0.1:{lp}","-m","10",
+                      "https://cp.cloudflare.com/generate_204"], capture_output=True, text=True)
+                  ok = r.stdout.strip() == "204"
+              except Exception: pass
+              p.terminate(); p.wait(); os.remove(cf)
+              return ok
+
+          def main():
+              pool = sys.argv[1] if len(sys.argv)>1 else None
+              out  = sys.argv[2] if len(sys.argv)>2 else os.path.join(HERE,"out","verified.txt")
+              want = int(sys.argv[3]) if len(sys.argv)>3 else 25
+              ensure_xray()
+              raw = load_pool(pool)
+              nodes, seen = [], set()
+              for l in raw:
+                  n = parse(l)
+                  if not n: continue
+                  cc = country(n, l)
+                  if not cc: continue
+                  k = (n["host"], n["port"], n["uuid"])
+                  if k in seen: continue
+                  seen.add(k); nodes.append((cc, n))
+              random.seed(); random.shuffle(nodes)
+              cnt = {}; cands = []
+              for cc, n in nodes:
+                  cnt[cc] = cnt.get(cc,0)+1
+                  if cnt[cc] <= 8: cands.append((cc, n))
+              print(f"кандидатов: {len(cands)}")
+              with ThreadPoolExecutor(max_workers=16) as ex:
+                  res = list(ex.map(test, [n for _,n in cands]))
+              verified = [(cc,n) for (cc,n),ok in zip(cands,res) if ok]
+              print(f"прошли реальный сеанс: {len(verified)}/{len(cands)}")
+              byc = {}
+              for cc,n in verified: byc.setdefault(cc,[]).append(n)
+              final, used = [], set()
+              for cc in POPULAR:
+                  taken = 0
+                  for n in byc.get(cc,[]):
+                      if n["host"] in used: continue
+                      used.add(n["host"]); final.append((cc,n)); taken += 1
+                      if len(final) >= want or taken == 2: break
+              os.makedirs(os.path.dirname(out), exist_ok=True)
+              with open(out,"w") as f:
+                  f.write("\n".join(n["raw"] for _,n in final))
+              with open(out+".base64","w") as f:
+                  f.write(base64.b64encode("\n".join(n["raw"] for _,n in final).encode()).decode())
+              from collections import Counter
+              print("ИТОГ:", len(final), dict(Counter(cc for cc,_ in final)))
+
+          if __name__ == "__main__": main()
+          PYEOF
+          python verifier_run.py - collector/out/verified.txt 30
+
+      - name: Publish key
+        run: |
+          git config user.name "bot"
+          git config user.email "bot@users.noreply.github.com"
+          mkdir -p collector/out
+          git add collector/out
+          git commit -m "verified key $(date -u +%FT%TZ)" || exit 0
+          git push
