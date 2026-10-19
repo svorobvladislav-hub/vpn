@@ -30,14 +30,8 @@ jobs:
           EOF
           base64 -w 0 collector/out/verified.txt > collector/out/verified.txt.base64
 
-      - name: Force Push to main
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-          git checkout --orphan latest_branch
-          git add -A
-          git commit -m "Auto: Update configs [skip ci]"
-          git branch -D main
-          git branch -m main
-          git push -f origin main
+      - name: Save changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto: Update configs"
+          file_pattern: collector/out/*
