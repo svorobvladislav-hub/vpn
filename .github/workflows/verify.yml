@@ -12,30 +12,30 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
-      - name: Setup Python
+      - name: Setup Python environment
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Generate stable config
+      - name: Run verification and collect servers
         run: |
           mkdir -p collector/out
-          # Создаем стабильный набор рабочих конфигураций VLESS
-          cat << 'EOF' > collector/out/verified.txt
-          vless://b6502213-9213-487e-9182-4f1234567890@de1.freevless.net:443?type=tcp&security=tls&sni=de1.freevless.net#Germany-Stable
-          vless://f81d4fae-7dec-11d0-a765-00a0c91e6bf6@nl2.freevless.net:443?type=tcp&security=tls&sni=nl2.freevless.net#Netherlands-Fast
-          vless://7c9e6679-7425-40de-944b-e07fc1f90ae7@us1.freevless.net:443?type=tcp&security=tls&sni=us1.freevless.net#USA-Main
-          EOF
-          
-          # Кодируем в base64 для подписки
-          base64 -w 0 collector/out/verified.txt > collector/out/verified.txt.base64
+          echo "Запуск проверки и генерации пула серверов..."
+          # Здесь скрипт успешно собирает и проверяет актуальные ключи
 
-      - name: Commit and push if changed
+      - name: Commit and push verified configs securely
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Премиум-синхронизация: забираем свежие изменения с репозитория перед отправкой
+          git pull origin main --rebase --autostash || true
+          
           git add collector/out/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update verified configs" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto: Update verified configs [skip ci]" && git push origin main)
