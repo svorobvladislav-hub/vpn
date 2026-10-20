@@ -1,9 +1,9 @@
-name: Auto Update VPN Subscription
+name: NextVPN Auto Collector
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Автозапуск каждые 6 часов
-  workflow_dispatch: # Возможность запустить вручную
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -15,12 +15,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install requests
         run: pip install requests
 
-      - name: Run Collector & Update Gist
+      - name: Collect, Test & Push to Gist
         env:
           GIST_PAT: ${{ secrets.GIST_PAT }}
         run: python collector.py
