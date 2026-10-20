@@ -3,42 +3,46 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import socket
 import time
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import unquote, urlparse
 import requests
 
-# Настройки твоего Gist
 GIST_ID = "70d5a02e3bb23a4ffb1b8fb27912c241"
 FILENAME = "verified.txt.base64"
 GITHUB_TOKEN = os.getenv("GIST_PAT")
 
-# Крупные обновляемые базы ключей
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+        " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+# Проверенные стабильные источники с прямыми нодами
 SOURCES = [
-    "https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/All_Configs_Sub.txt",
-    "https://raw.githubusercontent.com/yebekhe/TVC/main/subscriptions/xray/base64",
-    "https://raw.githubusercontent.com/NiREvil/vless/main/sub/link",
-    "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Esub/VLESS",
+    "https://raw.githubusercontent.com/vless-nodes/vless/main/sub",
     "https://raw.githubusercontent.com/peasoft/OpenNet/main/vless",
-    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
+    "https://raw.githubusercontent.com/freefq/free/master/vless",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/All_Configs_Sub.txt",
+    "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2",
 ]
 
-# Фильтр популярных стран (ищем по флагам, кодам и названиям в имени узла)
 POPULAR_COUNTRIES = {
     "NL": ("🇳🇱", "NL", "NETHERLANDS", "AMSTERDAM"),
-    "DE": ("🇩🇪", "DE", "GERMANY", "FRANKFURT", "FALKENSTEIN"),
+    "DE": ("🇩🇪", "DE", "GERMANY", "FRANKFURT"),
     "FI": ("🇫🇮", "FI", "FINLAND", "HELSINKI"),
     "CH": ("🇨🇭", "CH", "SWITZERLAND", "ZURICH"),
     "US": ("🇺🇸", "US", "USA", "UNITED STATES"),
     "GB": ("🇬🇧", "GB", "UK", "UNITED KINGDOM", "LONDON"),
     "FR": ("🇫🇷", "FR", "FRANCE", "PARIS"),
-    "PL": ("🇵🇱", "PL", "POLAND", "WARSAW"),
-    "TR": ("🇹🇷", "TR", "TURKEY", "ISTANBUL"),
-    "SE": ("🇸🇪", "SE", "SWEDEN", "STOCKHOLM"),
+    "PL": ("🇵🇱", "PL", "POLAND"),
+    "SE": ("🇸🇪", "SE", "SWEDEN"),
+    "TR": ("🇹🇷", "TR", "TURKEY"),
 }
 
 
-def decode_if_base64(text):
+def decode_data(text):
   text = text.strip()
-  if "vless://" in text or "trojan://" in text or "ss://" in text:
+  if "vless://" in text or "trojan://" in text:
     return text
   try:
     pad = len(text) % 4
@@ -50,37 +54,31 @@ def decode_if_base64(text):
 
 
 def detect_country(remark):
-  """Определяет страну по названию ключа. Если не популярная — возвращает None."""
   remark_upper = unquote(remark).upper()
   for code, keywords in POPULAR_COUNTRIES.items():
     for kw in keywords:
       if kw in remark_upper:
-        flag = keywords[0]
-        return f"{flag} {code}"
+        return f"{keywords[0]} {code}"
   return None
 
 
-def parse_and_filter(line):
-  """Разбирает ссылку, проверяет протокол и страну, вытаскивает host и port."""
+def parse_line(line):
   line = line.strip()
   if not line.startswith(("vless://", "trojan://")):
     return None
 
   try:
     parsed = urlparse(line)
-    if not parsed.hostname or not parsed.port:
+    if (
+        not parsed.hostname
+        or not parsed.port
+        or parsed.hostname in ("127.0.0.1", "localhost")
+    ):
       return None
 
-    # Отсеиваем заведомо сломанные или локальные адреса
-    if parsed.hostname in ("127.0.0.1", "localhost", "0.0.0.0"):
-      return None
-
-    country_tag = detect_country(parsed.fragment)
-    if not country_tag:
-      return None
-
-    # Оставляем базовую часть ссылки без старого названия (#...)
+    country_tag = detect_country(parsed.fragment) or "🌍 Global"
     clean_uri = line.split("#")[0]
+
     return {
         "uri": clean_uri,
         "host": parsed.hostname,
@@ -91,92 +89,88 @@ def parse_and_filter(line):
     return None
 
 
-def check_node_alive(node):
-  """Проверяет реальный TCP-отклик сервера с жестким таймаутом 0.8 сек."""
+def check_node(node):
   start = time.time()
   try:
-    with socket.create_connection((node["host"], node["port"]), timeout=0.8):
-      ping = int((time.time() - start) * 1000)
-      node["ping"] = ping
+    with socket.create_connection((node["host"], node["port"]), timeout=1.0):
+      node["ping"] = int((time.time() - start) * 1000)
       return node
   except Exception:
     return None
 
 
-def gather_candidates():
+def collect_nodes():
   raw_lines = []
   for url in SOURCES:
     try:
-      resp = requests.get(url, timeout=10)
-      if resp.status_code == 200:
-        content = decode_if_base64(resp.text)
+      resp = requests.get(url, headers=HEADERS, timeout=12)
+      if resp.status_code == 200 and resp.text.strip():
+        content = decode_data(resp.text)
         raw_lines.extend(content.splitlines())
+        print(f"Успешно получен источник: {url}")
+      else:
+        print(f"Источник вернул код {resp.status_code}: {url}")
     except Exception as e:
-      print(f"Пропуск источника {url}: {e}")
+      print(f"Ошибка источника {url}: {e}")
 
-  candidates = {}
+  parsed_nodes = {}
   for line in raw_lines:
-    item = parse_and_filter(line)
+    item = parse_line(line)
     if item:
-      # Убираем дубликаты по связке хост:порт
       key = f"{item['host']}:{item['port']}"
-      if key not in candidates:
-        candidates[key] = item
+      if key not in parsed_nodes:
+        parsed_nodes[key] = item
 
-  return list(candidates.values())
+  return list(parsed_nodes.values())
 
 
-def update_gist(b64_content):
+def update_gist(content):
   if not GITHUB_TOKEN:
-    print("Ошибка: не задан GIST_PAT в Secrets!")
+    print("Ошибка: GIST_PAT пустой! Проверь Secrets репозитория.")
     return
+
   url = f"https://api.github.com/gists/{GIST_ID}"
   headers = {
       "Authorization": f"token {GITHUB_TOKEN}",
       "Accept": "application/vnd.github+json",
   }
-  payload = {"files": {FILENAME: {"content": b64_content}}}
+  payload = {"files": {FILENAME: {"content": content}}}
+
   r = requests.patch(url, json=payload, headers=headers, timeout=15)
   if r.status_code == 200:
-    print(">>> Gist успешно обновлен! Все серверы живые и готовы к бою.")
+    print(">>> Gist успешно обновлен проверенными нодами!")
   else:
-    print(f"Ошибка API Gist ({r.status_code}): {r.text}")
+    print(f"Ошибка Gist API ({r.status_code}): {r.text}")
 
 
 if __name__ == "__main__":
-  print("1. Сбор и фильтрация по популярным странам...")
-  nodes = gather_candidates()
-  print(f"Найдено кандидатов нужных стран: {len(nodes)}")
+  nodes = collect_nodes()
+  print(f"Всего спарсено уникальных кандидатов: {len(nodes)}")
 
-  # Ограничиваем пул для быстрой проверки (до 600 свежих кандидатов за раз)
-  nodes = nodes[:600]
+  if not nodes:
+    print("Кандидаты не найдены.")
+    exit(0)
 
-  print("2. Запуск параллельного TCP-теста на живучесть (50 потоков)...")
-  alive_nodes = []
-  with ThreadPoolExecutor(max_workers=50) as executor:
-    futures = [executor.submit(check_node_alive, n) for n in nodes]
+  # Проверяем первые 300 серверов в 40 потоков
+  alive = []
+  with ThreadPoolExecutor(max_workers=40) as executor:
+    futures = [executor.submit(check_node, n) for n in nodes[:300]]
     for f in as_completed(futures):
       res = f.result()
       if res:
-        alive_nodes.append(res)
+        alive.append(res)
 
-  print(f"Прошли жесткий отбор (живые): {len(alive_nodes)}")
+  print(f"Живых серверов после проверки отклика: {len(alive)}")
 
-  if alive_nodes:
-    # Сортируем по пингу (самые быстрые в самом верху списка)
-    alive_nodes.sort(key=lambda x: x["ping"])
+  if alive:
+    alive.sort(key=lambda x: x["ping"])
+    top = alive[:60]
 
-    # Берем ТОП-80 самых быстрых серверов, чтобы не перегружать клиент
-    top_nodes = alive_nodes[:80]
+    out_lines = [
+        f"{n['uri']}#{n['country']} | Next VPN #{i} ⚡ {n['ping']}ms"
+        for i, n in enumerate(top, 1)
+    ]
 
-    final_links = []
-    for idx, n in enumerate(top_nodes, 1):
-      # Формируем красивое имя: 🇩🇪 DE | Next VPN #1 ⚡ 35ms
-      name = f"{n['country']} | Next VPN #{idx} ⚡ {n['ping']}ms"
-      final_links.append(f"{n['uri']}#{name}")
-
-    raw_sub = "\n".join(final_links)
-    b64_sub = base64.b64encode(raw_sub.encode("utf-8")).decode("utf-8")
-    update_gist(b64_sub)
-  else:
-    print("Ни один сервер не прошел проверку, оставляем старый список.")
+    raw_text = "\n".join(out_lines)
+    b64_res = base64.b64encode(raw_text.encode("utf-8")).decode("utf-8")
+    update_gist(b64_res)
